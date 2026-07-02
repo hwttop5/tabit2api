@@ -21,6 +21,18 @@ tabbit2api
 
 如果当前还没有可用的运行时 profile，Tabbit2API 会先打开 Tabbit 登录窗口，并在登录完成后再启动网关。
 
+## 首次登录和刷新 profile
+
+Tabbit2API 使用独立的本地运行时 profile，不会直接接管正在运行的 Tabbit 窗口。推荐流程：
+
+1. 先打开官方 Tabbit 客户端并确认网页聊天可用
+2. 关闭所有 Tabbit 窗口
+3. 运行 `tabbit2api login --refresh`
+4. 在弹出的 Tabbit2API 登录窗口中完成登录
+5. 再运行 `tabbit2api start`
+
+如果客户端请求返回类似 `[492] 欢迎使用 Tabbit 浏览器...` 或提示登录态不可用，通常是运行时 profile 没同步到有效登录态。请关闭 Tabbit 后重新执行 `tabbit2api login --refresh`。
+
 ## 验证环境
 
 检查本地路径和网关健康状态：
@@ -56,7 +68,7 @@ curl.exe -H "Authorization: Bearer sk-tabbit-local" http://127.0.0.1:50124/v1/mo
 默认路径：
 
 ```text
-Windows 可执行文件: %USERPROFILE%\AppData\Local\Tabbit\Application\Tabbit.exe
+Windows 可执行文件: %USERPROFILE%\AppData\Local\Tabbit\Application\Tabbit.exe 或 Tabbit Browser.exe
 Windows 用户数据目录: %USERPROFILE%\AppData\Local\Tabbit\User Data
 macOS 可执行文件: /Applications/Tabbit.app/Contents/MacOS/Tabbit
 macOS 用户数据目录: ~/Library/Application Support/Tabbit/User Data

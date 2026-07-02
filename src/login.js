@@ -21,6 +21,21 @@ function isLoggedIn(loginState) {
   return Boolean(loginState?.loginState?.isLoggedIn || loginState?.loginState?.hasToken);
 }
 
+function printProfileSyncWarnings(profile) {
+  const warnings = Array.isArray(profile?.syncWarnings)
+    ? profile.syncWarnings
+    : [];
+  if (!warnings.length) {
+    return;
+  }
+
+  console.warn("Tabbit2API could not copy some Tabbit login-state files.");
+  console.warn("Close all Tabbit windows, then run `tabbit2api login --refresh`.");
+  for (const warning of warnings) {
+    console.warn(`- ${warning.path} (${warning.code})`);
+  }
+}
+
 async function waitForLogin(page, timeoutMs) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -44,6 +59,7 @@ export async function runLogin(options = {}) {
     labProfileDir: LAB_PROFILE_DIR,
     forceRefresh,
   });
+  printProfileSyncWarnings(profile);
 
   const context = await launchTabbitSession(profile.labProfileDir, {
     headless: false,

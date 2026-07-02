@@ -34,6 +34,8 @@ const LOGIN_DETAIL_PATTERNS = [
   /\bsign[\s-]?in\b/i,
   /\bsigned out\b/i,
   /\bsession expired\b/i,
+  /欢迎使用\s*Tabbit\s*浏览器/i,
+  /免费使用最全最先进的模型/i,
 ];
 
 const INVALID_REQUEST_PATTERNS = [

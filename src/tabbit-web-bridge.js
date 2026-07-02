@@ -23,6 +23,7 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.TABBIT_SEND_TIMEOUT_MS || 180_000)
 const MODEL_CACHE_MS = Number(process.env.TABBIT_MODEL_CACHE_MS || 300_000);
 
 let bridgePromise = null;
+let chatPagePromise = null;
 let modelCache = null;
 let sendQueue = Promise.resolve();
 let activeSendCount = 0;
@@ -51,6 +52,9 @@ function summarizePath(value) {
 }
 
 function bridgeDiagnostics(profile = null) {
+  const syncWarnings = Array.isArray(profile?.syncWarnings)
+    ? profile.syncWarnings
+    : [];
   return {
     modelCache: {
       cached: Boolean(modelCache),
@@ -65,6 +69,7 @@ function bridgeDiagnostics(profile = null) {
     runtimeProfile: {
       labProfileDir: summarizePath(profile?.labProfileDir || LAB_PROFILE_DIR),
       defaultProfileDir: summarizePath(profile?.defaultProfileDir || ""),
+      syncWarnings,
     },
     lastBridgeError,
   };
@@ -215,14 +220,34 @@ async function ensureBridge() {
     bridgePromise = createBridge();
   }
 
-  return bridgePromise;
+  try {
+    return await bridgePromise;
+  } catch (error) {
+    bridgePromise = null;
+    throw error;
+  }
 }
 
 async function ensureChatPage(bridge) {
   let { page } = bridge;
   if (!page || page.isClosed()) {
-    page = await openPage(bridge.context, TABBIT_CHAT_URL);
-    bridge.page = page;
+    if (!chatPagePromise) {
+      chatPagePromise = (async () => {
+        const nextPage = await openPage(bridge.context, TABBIT_CHAT_URL);
+        await nextPage.waitForFunction(
+          () => Array.isArray(globalThis.webpackChunk_N_E),
+          null,
+          { timeout: 30_000 },
+        );
+        await nextPage.waitForTimeout(500);
+        bridge.page = nextPage;
+        return nextPage;
+      })().finally(() => {
+        chatPagePromise = null;
+      });
+    }
+
+    return chatPagePromise;
   }
 
   await page.waitForFunction(
@@ -236,13 +261,21 @@ async function ensureChatPage(bridge) {
 async function readLoginState(page) {
   return page.evaluate(async () => {
     const tabSignin = globalThis.chrome?.tabSignin;
+    const hasTabSignin = Boolean(
+      tabSignin && typeof tabSignin.getLoginState === "function",
+    );
     const loginState =
-      tabSignin && typeof tabSignin.getLoginState === "function"
+      hasTabSignin
         ? await tabSignin.getLoginState()
         : null;
+    const bodyText = document.body?.innerText || "";
 
     return {
       loginState,
+      hasTabSignin,
+      hasBrowserGateMessage:
+        /欢迎使用\s*Tabbit\s*浏览器/i.test(bodyText) ||
+        /免费使用最全最先进的模型/i.test(bodyText),
       hasComposer: Boolean(
         document.querySelector(
           "textarea, [contenteditable='true'], input[type='text']",
@@ -254,12 +287,84 @@ async function readLoginState(page) {
   });
 }
 
+function loginStateFlags(loginState) {
+  const direct = loginState?.loginState;
+  const nested = direct?.loginState;
+  return nested && typeof nested === "object" ? nested : direct;
+}
+
 function isLoggedOut(loginState) {
+  const flags = loginStateFlags(loginState);
   return Boolean(
-    loginState?.loginState &&
-      loginState.loginState.isLoggedIn === false &&
-      loginState.loginState.hasToken === false,
+    flags &&
+      flags.isLoggedIn === false &&
+      flags.hasToken === false,
   );
+}
+
+function promptDiagnostics(prompt) {
+  const text = typeof prompt === "string" ? prompt : "";
+  if (!text) {
+    return "";
+  }
+
+  return `Prompt diagnostics: ${text.length} characters were sent to Tabbit. Agent clients can include hidden system and context text even when the visible user message is short.`;
+}
+
+function appendPromptDiagnostics(detail, prompt) {
+  const diagnostic = promptDiagnostics(prompt);
+  const message = cleanText(detail);
+  if (!diagnostic || message.includes("Prompt diagnostics:")) {
+    return message;
+  }
+
+  return `${message}\n\n${diagnostic}`;
+}
+
+export function diagnoseLoginState(loginState, requestedModelAlias, prompt) {
+  if (!loginState?.hasTabSignin) {
+    return {
+      ok: false,
+      error: "login_required",
+      detail: appendPromptDiagnostics(
+        "Tabbit sign-in state is not available in the runtime page. Close all Tabbit windows, then run `tabbit2api login --refresh` and sign in once inside the login browser window.",
+        prompt,
+      ),
+      requestedModelAlias,
+      attemptedModels: [],
+      fallbackHappened: false,
+    };
+  }
+
+  if (loginState.hasBrowserGateMessage) {
+    return {
+      ok: false,
+      error: "login_required",
+      detail: appendPromptDiagnostics(
+        "Tabbit returned the browser sign-in gate in the runtime page. Close all Tabbit windows, then run `tabbit2api login --refresh` so Tabbit2API can refresh its local runtime profile.",
+        prompt,
+      ),
+      requestedModelAlias,
+      attemptedModels: [],
+      fallbackHappened: false,
+    };
+  }
+
+  if (isLoggedOut(loginState)) {
+    return {
+      ok: false,
+      error: "login_required",
+      detail: appendPromptDiagnostics(
+        "The local Tabbit runtime profile is not logged in. Run `tabbit2api login --refresh` and sign in once inside the login browser window.",
+        prompt,
+      ),
+      requestedModelAlias,
+      attemptedModels: [],
+      fallbackHappened: false,
+    };
+  }
+
+  return null;
 }
 
 async function sendUsingPageModule(
@@ -390,6 +495,97 @@ async function sendUsingPageModule(
         }
 
         return null;
+      }
+
+      function resolveSendMessage(runtime) {
+        for (const moduleId of [51523, 187]) {
+          try {
+            const candidate = runtime(moduleId);
+            if (typeof candidate?._z === "function") {
+              return candidate._z;
+            }
+          } catch {
+            // Module ids change between Tabbit Web builds.
+          }
+        }
+
+        const requiredSignals = [
+          "selectedModels",
+          "setMessages",
+          "startGenerating",
+          "stopGenerating",
+          "onChatFinish",
+          "onFailed",
+          "useDirectApi",
+        ];
+        for (const moduleId of Object.keys(runtime.m || {})) {
+          let candidate;
+          try {
+            candidate = runtime(moduleId);
+          } catch {
+            continue;
+          }
+          if (!candidate || typeof candidate !== "object") {
+            continue;
+          }
+          for (const value of Object.values(candidate)) {
+            if (typeof value !== "function") {
+              continue;
+            }
+            let source = "";
+            try {
+              source = Function.prototype.toString.call(value);
+            } catch {
+              continue;
+            }
+            if (requiredSignals.every((signal) => source.includes(signal))) {
+              return value;
+            }
+          }
+        }
+
+        throw new Error("Unable to find Tabbit sendMessage function.");
+      }
+
+      function resolveModes(runtime) {
+        for (const [moduleId, exportKey] of [
+          [32386, "R7"],
+          [86220, "R7"],
+          [81487, "R"],
+        ]) {
+          try {
+            const candidate = runtime(moduleId)?.[exportKey];
+            if (candidate?.ASK === "ask") {
+              return candidate;
+            }
+          } catch {
+            // Module ids change between Tabbit Web builds.
+          }
+        }
+
+        for (const moduleId of Object.keys(runtime.m || {})) {
+          let candidate;
+          try {
+            candidate = runtime(moduleId);
+          } catch {
+            continue;
+          }
+          if (!candidate || typeof candidate !== "object") {
+            continue;
+          }
+          for (const value of Object.values(candidate)) {
+            if (
+              value &&
+              typeof value === "object" &&
+              value.ASK === "ask" &&
+              value.MULTI_MODEL === "multi_model"
+            ) {
+              return value;
+            }
+          }
+        }
+
+        throw new Error("Unable to find Tabbit chat mode constants.");
       }
 
       function uploadResultToReference(attachment, uploadResult, referenceHelpers) {
@@ -723,6 +919,13 @@ async function sendUsingPageModule(
           .filter((entry) => entry.message || entry.code);
       }
 
+      function isBrowserGateDetail(detail) {
+        return (
+          /欢迎使用\s*Tabbit\s*浏览器/i.test(detail || "") ||
+          /免费使用最全最先进的模型/i.test(detail || "")
+        );
+      }
+
       function assistantRequiresLogin(assistant) {
         return assistant?.messages?.some((entry) => entry?.type === "login") || false;
       }
@@ -756,8 +959,8 @@ async function sendUsingPageModule(
       }
 
       const runtime = captureWebpackRequire();
-      const sendMessage = runtime(51523)._z;
-      const modes = runtime(32386).R7;
+      const sendMessage = resolveSendMessage(runtime);
+      const modes = resolveModes(runtime);
 
       const state = {
         messages: [],
@@ -801,14 +1004,30 @@ async function sendUsingPageModule(
 
         const errors = assistantErrors(assistant);
         if (errors.length > 0) {
+          const detail = errors
+            .map((entry) =>
+              entry.code ? `[${entry.code}] ${entry.message}` : entry.message,
+            )
+            .join("\n");
+          if (isBrowserGateDetail(detail)) {
+            settle({
+              ok: false,
+              error: "login_required",
+              detail:
+                "Tabbit returned the browser sign-in gate while sending the request. Close all Tabbit windows, then run `tabbit2api login --refresh` so Tabbit2API can refresh its local runtime profile.",
+              errorCodes: errors
+                .map((entry) => entry.code)
+                .filter(Boolean),
+              partialText: collectAssistantText(assistant),
+              source,
+            });
+            return true;
+          }
+
           settle({
             ok: false,
             error: "tabbit_error",
-            detail: errors
-              .map((entry) =>
-                entry.code ? `[${entry.code}] ${entry.message}` : entry.message,
-              )
-              .join("\n"),
+            detail,
             errorCodes: errors
               .map((entry) => entry.code)
               .filter(Boolean),
@@ -1096,16 +1315,13 @@ export async function sendPromptToTabbit({
       throw error;
     }
     const loginState = await readLoginState(page);
-    if (isLoggedOut(loginState)) {
-      return {
-        ok: false,
-        error: "login_required",
-        detail:
-          "The local Tabbit runtime profile is not logged in. Run `tabbit2api login` and sign in once inside the login browser window.",
-        requestedModelAlias,
-        attemptedModels: [],
-        fallbackHappened: false,
-      };
+    const loginFailure = diagnoseLoginState(
+      loginState,
+      requestedModelAlias,
+      prompt,
+    );
+    if (loginFailure) {
+      return loginFailure;
     }
 
     let rawModels = [];
@@ -1167,6 +1383,9 @@ export async function sendPromptToTabbit({
 
       const decoratedResult = {
         ...result,
+        detail: result.ok
+          ? result.detail
+          : appendPromptDiagnostics(result.detail, prompt),
         selectedModel: attempt.selectedModel,
         gatewayModelId: attempt.gatewayModelId,
         requestedModelAlias: routePlan.requestedModelAlias,

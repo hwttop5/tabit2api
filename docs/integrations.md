@@ -17,6 +17,12 @@ tabbit2api start
 
 如果你还没有 runtime profile，直接运行 `tabbit2api` 也可以，它会自动拉起登录并等待完成。
 
+首次配置或登录异常时，建议先在官方 Tabbit 客户端确认网页聊天可用，然后关闭所有 Tabbit 窗口并刷新本地运行时 profile：
+
+```powershell
+tabbit2api login --refresh
+```
+
 ## Codex 接入
 
 示例文件：
@@ -78,3 +84,9 @@ API 模式: codex_responses
 2. 运行 `tabbit2api start`
 3. 访问 `/health`
 4. 再接客户端配置
+
+## 常见错误
+
+- `[492] 欢迎使用 Tabbit 浏览器...`：通常是 Tabbit2API 的运行时 profile 没有有效登录态。关闭 Tabbit 后运行 `tabbit2api login --refresh`。
+- `health ok` 但客户端调用失败：`/health` 不会发起真实 Tabbit 消息请求，需要再用 `POST /v1/responses` 或客户端实际请求验证。
+- 可见只发了“你好”但仍失败：Codex / Claude Code 等客户端可能附带隐藏系统提示、工具说明和历史上下文，实际 prompt 会更长；错误消息中的 `Prompt diagnostics` 会显示发送给 Tabbit 的字符数。

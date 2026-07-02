@@ -108,6 +108,14 @@ test("platform defaults resolve Windows Tabbit and runtime paths", () => {
     "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit.exe",
   );
   assert.equal(
+    defaultTabbitExecutable({
+      platform: "win32",
+      homeDir,
+      existsSync: (candidate) => candidate.endsWith("Tabbit Browser.exe"),
+    }),
+    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit Browser.exe",
+  );
+  assert.equal(
     defaultTabbitUserDataDir({ platform: "win32", homeDir, env }),
     "C:\\Users\\tester\\AppData\\Local\\Tabbit\\User Data",
   );

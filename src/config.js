@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,20 +7,25 @@ function pathForPlatform(platform) {
 }
 
 export function defaultTabbitExecutable({
+  existsSync = fs.existsSync,
   platform = process.platform,
   homeDir = os.homedir(),
 } = {}) {
   const platformPath = pathForPlatform(platform);
 
   if (platform === "win32") {
-    return platformPath.join(
+    const applicationDir = platformPath.join(
       homeDir,
       "AppData",
       "Local",
       "Tabbit",
       "Application",
-      "Tabbit.exe",
     );
+    const candidates = [
+      platformPath.join(applicationDir, "Tabbit.exe"),
+      platformPath.join(applicationDir, "Tabbit Browser.exe"),
+    ];
+    return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
   }
 
   if (platform === "darwin") {

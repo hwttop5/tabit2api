@@ -28,6 +28,21 @@ const DEFAULT_EXCLUDES = new Set([
   "shared_proto_db",
 ]);
 
+function relativeProfilePath(sourceUserDataDir, sourcePath) {
+  return path.relative(sourceUserDataDir, sourcePath).replace(/\\/g, "/");
+}
+
+function isLikelyLoginStatePath(sourceUserDataDir, sourcePath) {
+  const relativePath = relativeProfilePath(sourceUserDataDir, sourcePath);
+  return (
+    relativePath === "Local State" ||
+    relativePath === "Default/Preferences" ||
+    relativePath === "Default/Cookies" ||
+    relativePath.startsWith("Default/Network/") ||
+    relativePath.startsWith("Default/Local Storage/")
+  );
+}
+
 function shouldIgnoreCopyError(error) {
   return (
     error &&
@@ -36,7 +51,24 @@ function shouldIgnoreCopyError(error) {
   );
 }
 
-async function copyPath(sourcePath, targetPath, excludedNames) {
+function recordCopyWarning(context, sourcePath, error) {
+  if (!context?.warnings || !context?.sourceUserDataDir) {
+    return;
+  }
+
+  if (!isLikelyLoginStatePath(context.sourceUserDataDir, sourcePath)) {
+    return;
+  }
+
+  context.warnings.push({
+    code: error?.code || "UNKNOWN",
+    path: relativeProfilePath(context.sourceUserDataDir, sourcePath),
+    message:
+      "A Tabbit login-state file could not be copied. Close Tabbit, then run `tabbit2api login --refresh`.",
+  });
+}
+
+async function copyPath(sourcePath, targetPath, excludedNames, context = {}) {
   const basename = path.basename(sourcePath);
   if (excludedNames.has(basename)) {
     return;
@@ -51,18 +83,20 @@ async function copyPath(sourcePath, targetPath, excludedNames) {
         path.join(sourcePath, entry.name),
         path.join(targetPath, entry.name),
         excludedNames,
+        context,
       );
     }
     return;
   }
 
   try {
-    await fs.copyFile(sourcePath, targetPath);
+    await context.copyFile(sourcePath, targetPath);
   } catch (error) {
     if (shouldIgnoreCopyError(error)) {
       console.warn(
         `[profile] skipped busy or inaccessible file: ${sourcePath} (${error.code})`,
       );
+      recordCopyWarning(context, sourcePath, error);
       return;
     }
     throw error;
@@ -90,9 +124,16 @@ export async function prepareLabProfile({
   sourceUserDataDir,
   labProfileDir,
   forceRefresh = false,
+  copyFile = fs.copyFile,
 }) {
   const defaultSourceDir = path.join(sourceUserDataDir, "Default");
   const defaultTargetDir = path.join(labProfileDir, "Default");
+  const warnings = [];
+  const copyContext = {
+    copyFile,
+    sourceUserDataDir,
+    warnings,
+  };
 
   if (forceRefresh) {
     await removeIfExists(labProfileDir);
@@ -102,6 +143,7 @@ export async function prepareLabProfile({
     return {
       defaultProfileDir: defaultTargetDir,
       labProfileDir,
+      syncWarnings: warnings,
     };
   }
 
@@ -114,9 +156,20 @@ export async function prepareLabProfile({
     try {
       const stats = await fs.stat(sourcePath);
       if (stats.isDirectory()) {
-        await copyPath(sourcePath, targetPath, ROOT_EXCLUDES);
+        await copyPath(sourcePath, targetPath, ROOT_EXCLUDES, copyContext);
       } else {
-        await fs.copyFile(sourcePath, targetPath);
+        try {
+          await copyFile(sourcePath, targetPath);
+        } catch (error) {
+          if (shouldIgnoreCopyError(error)) {
+            console.warn(
+              `[profile] skipped busy or inaccessible file: ${sourcePath} (${error.code})`,
+            );
+            recordCopyWarning(copyContext, sourcePath, error);
+          } else {
+            throw error;
+          }
+        }
       }
     } catch {
       // Optional source entry.
@@ -124,7 +177,7 @@ export async function prepareLabProfile({
   }
 
   if (await pathExists(defaultSourceDir)) {
-    await copyPath(defaultSourceDir, defaultTargetDir, DEFAULT_EXCLUDES);
+    await copyPath(defaultSourceDir, defaultTargetDir, DEFAULT_EXCLUDES, copyContext);
   } else {
     await fs.mkdir(defaultTargetDir, { recursive: true });
   }
@@ -137,5 +190,6 @@ export async function prepareLabProfile({
   return {
     defaultProfileDir: defaultTargetDir,
     labProfileDir,
+    syncWarnings: warnings,
   };
 }

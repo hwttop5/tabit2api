@@ -46,3 +46,42 @@ test("prepareLabProfile copies existing Default profile while skipping cache dir
     fs.access(path.join(labProfileDir, "Default", "Cache", "ignored")),
   );
 });
+
+test("prepareLabProfile records warnings for inaccessible login-state files", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "tabbit2api-profile-"));
+  const sourceUserDataDir = path.join(tempDir, "source");
+  const labProfileDir = path.join(tempDir, "lab");
+  const sourceDefault = path.join(sourceUserDataDir, "Default");
+  const cookiePath = path.join(sourceDefault, "Network", "Cookies");
+
+  await fs.mkdir(path.dirname(cookiePath), { recursive: true });
+  await fs.writeFile(cookiePath, "locked", "utf8");
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const profile = await prepareLabProfile({
+      sourceUserDataDir,
+      labProfileDir,
+      copyFile: async (sourcePath, targetPath) => {
+        if (sourcePath === cookiePath) {
+          const error = new Error("simulated lock");
+          error.code = "EPERM";
+          throw error;
+        }
+
+        await fs.copyFile(sourcePath, targetPath);
+      },
+    });
+
+    assert.equal(profile.syncWarnings.length, 1);
+    assert.deepEqual(profile.syncWarnings[0], {
+      code: "EPERM",
+      path: "Default/Network/Cookies",
+      message:
+        "A Tabbit login-state file could not be copied. Close Tabbit, then run `tabbit2api login --refresh`.",
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+});

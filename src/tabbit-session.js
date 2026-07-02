@@ -26,11 +26,12 @@ export async function launchTabbitSession(profileDir, options = {}) {
     executablePath: TABBIT_EXECUTABLE,
     headless: options.headless ?? false,
     viewport: null,
-    ignoreDefaultArgs: ["--disable-extensions"],
+    ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
     args: [
       "--no-first-run",
       "--disable-background-networking",
       "--disable-component-update",
+      "--disable-blink-features=AutomationControlled",
     ],
   });
 

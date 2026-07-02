@@ -56,7 +56,7 @@ function normalizeRequestMetadata(metadata) {
 }
 
 function statusCodeForResult(result) {
-  if (result.error === "login_required") {
+  if (result.error === "login_required" || result.failure_reason === "login_required") {
     return 401;
   }
 
@@ -76,7 +76,7 @@ function statusCodeForResult(result) {
 }
 
 function openAiErrorTypeForResult(result) {
-  if (result.error === "login_required") {
+  if (result.error === "login_required" || result.failure_reason === "login_required") {
     return "authentication_error";
   }
 
@@ -88,7 +88,7 @@ function openAiErrorTypeForResult(result) {
 }
 
 function anthropicErrorTypeForResult(result) {
-  if (result.error === "login_required") {
+  if (result.error === "login_required" || result.failure_reason === "login_required") {
     return "authentication_error";
   }
 

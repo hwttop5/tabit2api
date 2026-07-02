@@ -65,10 +65,17 @@ tabbit/priority
   },
   "runtimeProfile": {
     "labProfileDir": ".../tabbit2api/tabbit-user-data",
-    "defaultProfileDir": ""
+    "defaultProfileDir": "",
+    "syncWarnings": []
   },
   "lastBridgeError": null
 }
+```
+
+`syncWarnings` 只包含相对路径和错误码，用于提示登录态相关文件是否因 Tabbit 正在运行、文件锁或权限问题没有复制成功。若这里出现 `Default/Network/Cookies`、`Local State` 等条目，请关闭所有 Tabbit 窗口后运行：
+
+```powershell
+tabbit2api login --refresh
 ```
 
 ## `GET /v1/models`
@@ -150,6 +157,8 @@ Anthropic Messages 兼容层，适合 Claude Code、OpenClaw 等客户端。
 `tabbit/priority` 会优先尝试内置主路由模型，若遇到可重试的上游不可用错误，再落到备选模型。
 
 这层路由只影响本地兼容层对 Tabbit 的选择，不改变客户端看到的统一模型名。
+
+如果 Tabbit 返回 `[492] 欢迎使用 Tabbit 浏览器...`，网关会将其视为运行时 profile 未通过 Tabbit 浏览器登录态校验，而不是普通模型繁忙错误。请先刷新登录态；如果只在 Codex / Claude Code 等客户端失败，还要留意这些客户端会携带隐藏系统提示和上下文，实际发送给 Tabbit 的 prompt 可能明显长于可见的一句消息。
 
 ## 调用示例
 

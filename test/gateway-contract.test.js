@@ -23,6 +23,7 @@ import { normalizeChatCompletionsRequest } from "../src/openai-chat.js";
 import {
   attachmentUploadResultToReference,
   classifyAttemptFailure,
+  diagnoseLoginState,
   putPresignedUpload,
 } from "../src/tabbit-web-bridge.js";
 import {
@@ -889,14 +890,14 @@ test("OpenAI routes surface Tabbit upstream availability failures as 503", async
   }
 });
 
-test("Tabbit limit messages are classified as retryable upstream failures", () => {
+test("Tabbit browser gate messages are classified as login failures", () => {
   assert.deepEqual(
     classifyAttemptFailure({
       ok: false,
       error: "tabbit_error",
       detail: "[492] 欢迎使用 Tabbit 浏览器（https://www.tabbitbrowser.com/），可免费使用最全最先进的模型。",
     }),
-    { retryable: true, reason: "upstream_unavailable" },
+    { retryable: false, reason: "login_required" },
   );
 
   assert.deepEqual(
@@ -907,6 +908,127 @@ test("Tabbit limit messages are classified as retryable upstream failures", () =
     }),
     { retryable: true, reason: "upstream_unavailable" },
   );
+});
+
+test("Tabbit login diagnostics report missing sign-in bridge and prompt size", () => {
+  const result = diagnoseLoginState(
+    { hasTabSignin: false, hasBrowserGateMessage: false },
+    "tabbit/priority",
+    "hello",
+  );
+
+  assert.equal(result.error, "login_required");
+  assert.match(result.detail, /Tabbit sign-in state is not available/);
+  assert.match(result.detail, /tabbit2api login --refresh/);
+  assert.match(result.detail, /5 characters/);
+});
+
+test("Tabbit login diagnostics report explicit signed-out state", () => {
+  const result = diagnoseLoginState(
+    {
+      hasTabSignin: true,
+      hasBrowserGateMessage: false,
+      loginState: {
+        loginState: {
+          isLoggedIn: false,
+          hasToken: false,
+        },
+      },
+    },
+    "tabbit/priority",
+    "hello",
+  );
+
+  assert.equal(result.error, "login_required");
+  assert.match(result.detail, /runtime profile is not logged in/);
+});
+
+test("Tabbit login diagnostics accept flat signed-out state", () => {
+  const result = diagnoseLoginState(
+    {
+      hasTabSignin: true,
+      hasBrowserGateMessage: false,
+      loginState: {
+        isLoggedIn: false,
+        hasToken: false,
+      },
+    },
+    "tabbit/priority",
+    "hello",
+  );
+
+  assert.equal(result.error, "login_required");
+});
+
+test("OpenAI routes surface Tabbit browser gate failures as auth errors", async () => {
+  const { server, baseUrl } = await startServer({
+    runGatewaySession: async () => ({
+      ok: false,
+      error: "login_required",
+      detail:
+        "Tabbit returned the browser sign-in gate while sending the request.\n\nPrompt diagnostics: 123 characters were sent to Tabbit.",
+      failure_reason: "login_required",
+      requestedModelAlias: "tabbit/priority",
+      attemptedModels: ["tabbit/Claude-Opus-4.7"],
+      fallbackHappened: false,
+    }),
+  });
+  try {
+    const { response, body } = await requestJson(`${baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "tabbit/priority",
+        input: "hello",
+      }),
+    });
+
+    assert.equal(response.status, 401);
+    assert.equal(body.error.type, "authentication_error");
+    assert.match(body.error.message, /browser sign-in gate/);
+    assert.match(body.error.message, /Prompt diagnostics/);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test("Anthropic routes keep error shape for Tabbit login failures", async () => {
+  const { server, baseUrl } = await startServer({
+    runGatewaySession: async () => ({
+      ok: false,
+      error: "login_required",
+      detail:
+        "Tabbit sign-in state is not available in the runtime page.\n\nPrompt diagnostics: 456 characters were sent to Tabbit.",
+      failure_reason: "login_required",
+      requestedModelAlias: "tabbit/priority",
+      attemptedModels: [],
+      fallbackHappened: false,
+    }),
+  });
+  try {
+    const { response, body } = await requestJson(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": "test-key",
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "tabbit/priority",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    assert.equal(response.status, 401);
+    assert.equal(body.type, "error");
+    assert.equal(body.error.type, "authentication_error");
+    assert.match(body.error.message, /sign-in state/);
+  } finally {
+    await stopServer(server);
+  }
 });
 
 test("bridge core preserves priority route catalog behavior", () => {

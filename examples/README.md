@@ -14,6 +14,12 @@ tabbit2api
 tabbit2api start
 ```
 
+首次使用或遇到 `[492] 欢迎使用 Tabbit 浏览器...` 时，先关闭所有 Tabbit 窗口，再刷新 Tabbit2API 的本地运行时 profile：
+
+```powershell
+tabbit2api login --refresh
+```
+
 默认本地参数：
 
 ```text
