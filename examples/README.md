@@ -20,6 +20,8 @@ tabbit2api start
 tabbit2api login --refresh
 ```
 
+如果刷新后只有 Codex 这类客户端仍失败，先用最小 `POST /v1/responses` 请求验证网关登录态。最小请求正常但 Codex 错误里的 `Prompt diagnostics` 很大时，说明客户端隐藏系统提示、工具 schema 或历史上下文已经让实际 prompt 明显变长，建议新开 Codex 会话或减少上下文后重试。
+
 默认本地参数：
 
 ```text

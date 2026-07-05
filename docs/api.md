@@ -158,7 +158,9 @@ Anthropic Messages 兼容层，适合 Claude Code、OpenClaw 等客户端。
 
 这层路由只影响本地兼容层对 Tabbit 的选择，不改变客户端看到的统一模型名。
 
-如果 Tabbit 返回 `[492] 欢迎使用 Tabbit 浏览器...`，网关会将其视为运行时 profile 未通过 Tabbit 浏览器登录态校验，而不是普通模型繁忙错误。请先刷新登录态；如果只在 Codex / Claude Code 等客户端失败，还要留意这些客户端会携带隐藏系统提示和上下文，实际发送给 Tabbit 的 prompt 可能明显长于可见的一句消息。
+如果 Tabbit 返回 `[492] 欢迎使用 Tabbit 浏览器...`，网关会将其视为运行时 profile 未通过 Tabbit 浏览器登录态校验，而不是普通模型繁忙错误。请先关闭所有 Tabbit 窗口并刷新登录态；如果 `tabbit2api login --refresh` 后仍失败，先用最小 `POST /v1/responses` 请求验证网关是否能发送普通文本。
+
+如果最小请求正常，但 Codex / Claude Code 等客户端仍失败，请查看错误中的 `Prompt diagnostics`。这些客户端可能携带隐藏系统提示、工具 schema 和历史上下文，实际发送给 Tabbit 的 prompt 可能明显长于可见的一句消息。超过 32000 字符时，优先新开客户端会话或减少上下文后重试。
 
 ## 调用示例
 

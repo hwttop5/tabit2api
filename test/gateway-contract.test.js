@@ -125,6 +125,15 @@ async function stopServer(server) {
   });
 }
 
+function jsonLineAfterHeader(prompt, header) {
+  const marker = `${header}\n`;
+  const start = prompt.indexOf(marker);
+  assert.notEqual(start, -1, `missing prompt header: ${header}`);
+  const lineStart = start + marker.length;
+  const lineEnd = prompt.indexOf("\n", lineStart);
+  return prompt.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+}
+
 async function startGatewayForTest(overrides = {}) {
   const originalLog = console.log;
   console.log = () => {};
@@ -923,6 +932,21 @@ test("Tabbit login diagnostics report missing sign-in bridge and prompt size", (
   assert.match(result.detail, /5 characters/);
 });
 
+test("Tabbit login diagnostics recommend reducing large Codex prompts", () => {
+  const largePrompt = "x".repeat(32_001);
+  const result = diagnoseLoginState(
+    { hasTabSignin: false, hasBrowserGateMessage: false },
+    "tabbit/priority",
+    largePrompt,
+  );
+
+  assert.equal(result.error, "login_required");
+  assert.match(result.detail, /32001 characters/);
+  assert.match(result.detail, /minimal `\/v1\/responses` request/);
+  assert.match(result.detail, /new Codex session/);
+  assert.match(result.detail, /reduce conversation\/context/);
+});
+
 test("Tabbit login diagnostics report explicit signed-out state", () => {
   const result = diagnoseLoginState(
     {
@@ -1534,6 +1558,70 @@ test("buildStructuredPrompt includes tool contract and conversation", () => {
   assert.match(prompt, /Return exactly one JSON object/);
   assert.match(prompt, /Available client tools/);
   assert.match(prompt, /Conversation state/);
+  assert.match(prompt, /Available client tools:\n\[\{"name":"bash"/);
+  assert.match(prompt, /Conversation state:\n\[\{"role":"user"/);
+  assert.doesNotMatch(prompt, /Available client tools:\n\[\n/);
+  assert.doesNotMatch(prompt, /Conversation state:\n\[\n/);
+});
+
+test("buildStructuredPrompt keeps Codex-like tool schemas compact", () => {
+  const tools = Array.from({ length: 12 }, (_, index) => ({
+    type: "function",
+    function: {
+      name: `tool_${index}`,
+      description:
+        "Large Codex tool description with enough text to make pretty JSON overhead measurable.",
+      parameters: {
+        type: "object",
+        properties: Object.fromEntries(
+          Array.from({ length: 8 }, (_unused, propertyIndex) => [
+            `field_${propertyIndex}`,
+            {
+              type: "string",
+              description: `Parameter ${propertyIndex} for tool ${index}.`,
+            },
+          ]),
+        ),
+        required: ["field_0", "field_1"],
+      },
+    },
+  }));
+  const normalized = normalizeOpenAiRequest({
+    model: "tabbit/priority",
+    instructions:
+      "You are Codex running with hidden system instructions and tool schemas.",
+    input: [
+      {
+        role: "user",
+        content: "hello",
+      },
+    ],
+    tools,
+  });
+
+  const prompt = buildStructuredPrompt(normalized);
+  const compactSections = [
+    "System instructions:",
+    "Available client tools:",
+    "Available server tools:",
+    "Conversation state:",
+  ].map((header) => jsonLineAfterHeader(prompt, header));
+  const legacyPrettySections = compactSections.map((section) =>
+    JSON.stringify(JSON.parse(section), null, 2),
+  );
+
+  const compactLength = compactSections.join("").length;
+  const legacyPrettyLength = legacyPrettySections.join("").length;
+
+  assert.ok(
+    legacyPrettyLength - compactLength > 3_000,
+    `expected compact prompt sections to save >3000 characters, saved ${
+      legacyPrettyLength - compactLength
+    }`,
+  );
+  assert.match(prompt, /"name":"tool_0"/);
+  assert.match(prompt, /"field_7"/);
+  assert.match(prompt, /Conversation state:\n\[\{"role":"user"/);
 });
 
 test("parseStructuredEnvelope accepts fenced JSON", () => {
@@ -1623,7 +1711,7 @@ test("buildStructuredPrompt hides vision_analyze when native attachments exist",
 
   const prompt = buildStructuredPrompt(normalized);
   assert.doesNotMatch(prompt, /"name": "vision_analyze"/);
-  assert.match(prompt, /"name": "other_tool"/);
+  assert.match(prompt, /"name":"other_tool"/);
   assert.match(prompt, /Unavailable client tools for this turn/);
   assert.match(prompt, /native attachment directly/);
   assert.doesNotMatch(prompt, /Do not call vision_analyze/);

@@ -59,6 +59,10 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+function promptJson(value) {
+  return JSON.stringify(value);
+}
+
 export function contentBlocksToText(blocks) {
   return blocks
     .filter((block) => block.type === "text" && typeof block.text === "string")
@@ -567,7 +571,7 @@ export function buildStructuredPrompt(normalizedRequest) {
     "Do not use markdown fences.",
     "",
     "The JSON schema is:",
-    JSON.stringify(
+    promptJson(
       {
         stop_reason: "end_turn or tool_use",
         content: [
@@ -586,8 +590,6 @@ export function buildStructuredPrompt(normalizedRequest) {
           },
         ],
       },
-      null,
-      2,
     ),
     "",
     "Rules:",
@@ -601,10 +603,10 @@ export function buildStructuredPrompt(normalizedRequest) {
     toolChoiceInstructions(normalizedRequest.toolChoice),
     "",
     "System instructions:",
-    JSON.stringify(normalizedRequest.system, null, 2),
+    promptJson(normalizedRequest.system),
     "",
     "Available client tools:",
-    JSON.stringify(clientTools, null, 2),
+    promptJson(clientTools),
   ];
 
   if (blockedTools.length) {
@@ -618,13 +620,11 @@ export function buildStructuredPrompt(normalizedRequest) {
   sections.push(
     "",
     "Available server tools:",
-    JSON.stringify(serverTools, null, 2),
+    promptJson(serverTools),
     "",
     "Conversation state:",
-    JSON.stringify(
+    promptJson(
       summarizeNormalizedMessages(normalizedRequest.messages, { hasAttachments }),
-      null,
-      2,
     ),
   );
 
@@ -634,10 +634,8 @@ export function buildStructuredPrompt(normalizedRequest) {
       "Attached files:",
       "The files below are provided to the model as Tabbit references. Use their actual contents when answering; do not assume they are only text placeholders.",
       "When an attached file is relevant, answer from the native attachment directly. Do not claim an attached image or file is missing. Do not ask the user to retry analysis, choose OCR, or provide a manual description.",
-      JSON.stringify(
+      promptJson(
         summarizeNormalizedAttachments(normalizedRequest.attachments),
-        null,
-        2,
       ),
     );
   }
@@ -772,7 +770,7 @@ async function repairStructuredEnvelope(rawText, normalizedRequest, deps) {
     "Repair the following assistant output into valid JSON only.",
     "Preserve the original meaning. Do not add new tool calls.",
     "Use the exact schema below:",
-    JSON.stringify(
+    promptJson(
       {
         stop_reason: "end_turn or tool_use",
         content: [
@@ -791,8 +789,6 @@ async function repairStructuredEnvelope(rawText, normalizedRequest, deps) {
           },
         ],
       },
-      null,
-      2,
     ),
     "",
     "Original output:",

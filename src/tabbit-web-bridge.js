@@ -21,6 +21,7 @@ export { classifyAttemptFailure, toGatewayModelId } from "./tabbit-bridge-core.j
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.TABBIT_SEND_TIMEOUT_MS || 180_000);
 const MODEL_CACHE_MS = Number(process.env.TABBIT_MODEL_CACHE_MS || 300_000);
+const LARGE_AGENT_PROMPT_CHARS = 32_000;
 
 let bridgePromise = null;
 let chatPagePromise = null;
@@ -308,7 +309,17 @@ function promptDiagnostics(prompt) {
     return "";
   }
 
-  return `Prompt diagnostics: ${text.length} characters were sent to Tabbit. Agent clients can include hidden system and context text even when the visible user message is short.`;
+  const diagnostics = [
+    `Prompt diagnostics: ${text.length} characters were sent to Tabbit. Agent clients can include hidden system and context text even when the visible user message is short.`,
+  ];
+
+  if (text.length > LARGE_AGENT_PROMPT_CHARS) {
+    diagnostics.push(
+      "This is a large agent prompt. If `tabbit2api login --refresh` already succeeded and a minimal `/v1/responses` request works, start a new Codex session or reduce conversation/context before retrying.",
+    );
+  }
+
+  return diagnostics.join(" ");
 }
 
 function appendPromptDiagnostics(detail, prompt) {
