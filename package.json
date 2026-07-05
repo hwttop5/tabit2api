@@ -1,6 +1,6 @@
 {
   "name": "tabbit2api",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "Tabbit to OpenAI Responses-compatible gateway for local agent integrations.",
   "repository": {
