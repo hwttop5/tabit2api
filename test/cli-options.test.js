@@ -102,18 +102,38 @@ test("CLI rejects unknown commands, unknown options, and invalid ports", () => {
 test("platform defaults resolve Windows Tabbit and runtime paths", () => {
   const homeDir = "C:\\Users\\tester";
   const env = { LOCALAPPDATA: "D:\\LocalAppData" };
+  const legacyExecutable =
+    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit.exe";
+  const browserExecutable =
+    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit Browser.exe";
 
   assert.equal(
     defaultTabbitExecutable({ platform: "win32", homeDir }),
-    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit.exe",
+    legacyExecutable,
   );
   assert.equal(
     defaultTabbitExecutable({
       platform: "win32",
       homeDir,
-      existsSync: (candidate) => candidate.endsWith("Tabbit Browser.exe"),
+      existsSync: (candidate) => candidate === legacyExecutable,
     }),
-    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit Browser.exe",
+    legacyExecutable,
+  );
+  assert.equal(
+    defaultTabbitExecutable({
+      platform: "win32",
+      homeDir,
+      existsSync: (candidate) => candidate === browserExecutable,
+    }),
+    browserExecutable,
+  );
+  assert.equal(
+    defaultTabbitExecutable({
+      platform: "win32",
+      homeDir,
+      existsSync: () => false,
+    }),
+    legacyExecutable,
   );
   assert.equal(
     defaultTabbitUserDataDir({ platform: "win32", homeDir, env }),

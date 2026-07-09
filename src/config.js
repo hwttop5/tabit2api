@@ -6,6 +6,8 @@ function pathForPlatform(platform) {
   return platform === "win32" ? path.win32 : path.posix;
 }
 
+const WINDOWS_TABBIT_EXECUTABLE_NAMES = ["Tabbit.exe", "Tabbit Browser.exe"];
+
 export function defaultTabbitExecutable({
   existsSync = fs.existsSync,
   platform = process.platform,
@@ -21,10 +23,9 @@ export function defaultTabbitExecutable({
       "Tabbit",
       "Application",
     );
-    const candidates = [
-      platformPath.join(applicationDir, "Tabbit.exe"),
-      platformPath.join(applicationDir, "Tabbit Browser.exe"),
-    ];
+    const candidates = WINDOWS_TABBIT_EXECUTABLE_NAMES.map((name) =>
+      platformPath.join(applicationDir, name),
+    );
     return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
   }
 
