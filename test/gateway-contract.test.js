@@ -16,8 +16,11 @@ import {
   normalizeOpenAiRequest,
   normalizeAnthropicRequest,
   buildStructuredPrompt,
+  prepareStructuredPrompt,
   parseStructuredEnvelope,
   runGatewaySession,
+  TABBIT_PROMPT_TARGET_CHARS,
+  TABBIT_PROMPT_MAX_CHARS,
 } from "../src/session-core.js";
 import { normalizeChatCompletionsRequest } from "../src/openai-chat.js";
 import {
@@ -933,7 +936,7 @@ test("Tabbit login diagnostics report missing sign-in bridge and prompt size", (
 });
 
 test("Tabbit login diagnostics recommend reducing large Codex prompts", () => {
-  const largePrompt = "x".repeat(32_001);
+  const largePrompt = "x".repeat(20_501);
   const result = diagnoseLoginState(
     { hasTabSignin: false, hasBrowserGateMessage: false },
     "tabbit/priority",
@@ -941,10 +944,10 @@ test("Tabbit login diagnostics recommend reducing large Codex prompts", () => {
   );
 
   assert.equal(result.error, "login_required");
-  assert.match(result.detail, /32001 characters/);
+  assert.match(result.detail, /20501 characters/);
+  assert.match(result.detail, /observed 20500-character prompt limit/);
   assert.match(result.detail, /minimal `\/v1\/responses` request/);
-  assert.match(result.detail, /new Codex session/);
-  assert.match(result.detail, /reduce conversation\/context/);
+  assert.match(result.detail, /reduce the current user input/);
 });
 
 test("Tabbit login diagnostics report explicit signed-out state", () => {
@@ -1050,6 +1053,52 @@ test("Anthropic routes keep error shape for Tabbit login failures", async () => 
     assert.equal(body.type, "error");
     assert.equal(body.error.type, "authentication_error");
     assert.match(body.error.message, /sign-in state/);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test("oversized prompt failures keep OpenAI and Anthropic error shapes", async () => {
+  const runGatewaySession = async () => ({
+    ok: false,
+    error: "invalid_request",
+    detail:
+      "Structured prompt is 21000 characters after safe compaction, exceeding Tabbit's observed 20500-character limit.",
+    requestedModelAlias: "tabbit/priority",
+    attemptedModels: [],
+    fallbackHappened: false,
+  });
+  const { server, baseUrl } = await startServer({ runGatewaySession });
+  try {
+    const openAi = await requestJson(`${baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "tabbit/priority", input: "hello" }),
+    });
+    assert.equal(openAi.response.status, 400);
+    assert.equal(openAi.body.error.type, "invalid_request_error");
+    assert.match(openAi.body.error.message, /20500-character limit/);
+
+    const anthropic = await requestJson(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": "test-key",
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "tabbit/priority",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+    assert.equal(anthropic.response.status, 400);
+    assert.equal(anthropic.body.type, "error");
+    assert.equal(anthropic.body.error.type, "invalid_request_error");
+    assert.match(anthropic.body.error.message, /20500-character limit/);
   } finally {
     await stopServer(server);
   }
@@ -1622,6 +1671,105 @@ test("buildStructuredPrompt keeps Codex-like tool schemas compact", () => {
   assert.match(prompt, /"name":"tool_0"/);
   assert.match(prompt, /"field_7"/);
   assert.match(prompt, /Conversation state:\n\[\{"role":"user"/);
+});
+
+test("prepareStructuredPrompt leaves prompts under budget unchanged", () => {
+  const normalized = normalizeOpenAiRequest({
+    model: "tabbit/priority",
+    instructions: "Keep this instruction unchanged.",
+    input: "hello",
+  });
+
+  const prepared = prepareStructuredPrompt(normalized);
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.compacted, false);
+  assert.equal(prepared.originalChars, prepared.sentChars);
+  assert.equal(prepared.prompt, buildStructuredPrompt(normalized));
+});
+
+test("prepareStructuredPrompt compacts Codex system and developer context", () => {
+  const system = `SYSTEM_HEAD\n${"s".repeat(21_000)}\nSYSTEM_TAIL`;
+  const developer = `DEVELOPER_HEAD\n${"d".repeat(22_000)}\nDEVELOPER_TAIL`;
+  const normalized = normalizeOpenAiRequest({
+    model: "tabbit/priority",
+    instructions: system,
+    input: [
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: developer }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "LATEST_USER_MESSAGE" }],
+      },
+    ],
+  });
+
+  const prepared = prepareStructuredPrompt(normalized);
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.compacted, true);
+  assert.ok(prepared.originalChars > TABBIT_PROMPT_MAX_CHARS);
+  assert.ok(prepared.sentChars <= TABBIT_PROMPT_TARGET_CHARS);
+  assert.match(prepared.prompt, /SYSTEM_HEAD/);
+  assert.match(prepared.prompt, /SYSTEM_TAIL/);
+  assert.match(prepared.prompt, /DEVELOPER_HEAD/);
+  assert.match(prepared.prompt, /DEVELOPER_TAIL/);
+  assert.match(prepared.prompt, /LATEST_USER_MESSAGE/);
+  assert.match(prepared.prompt, /system instructions omitted/);
+  assert.match(prepared.prompt, /developer context omitted/);
+});
+
+test("prepareStructuredPrompt omits only old history after context compaction", () => {
+  const normalized = normalizeOpenAiRequest({
+    model: "tabbit/priority",
+    instructions: "i".repeat(8_000),
+    input: Array.from({ length: 10 }, (_unused, index) => ({
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: `MESSAGE_${index}_START_${String(index).repeat(1_450)}_MESSAGE_${index}_END`,
+        },
+      ],
+    })),
+  });
+
+  const prepared = prepareStructuredPrompt(normalized);
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.compacted, true);
+  assert.equal(prepared.omittedMessageCount, 4);
+  assert.doesNotMatch(prepared.prompt, /MESSAGE_0_START/);
+  assert.doesNotMatch(prepared.prompt, /MESSAGE_3_START/);
+  assert.match(prepared.prompt, /MESSAGE_4_START/);
+  assert.match(prepared.prompt, /MESSAGE_9_END/);
+  assert.match(prepared.prompt, /4 older conversation messages omitted/);
+});
+
+test("runGatewaySession rejects an irreducibly large current user message", async () => {
+  const normalized = normalizeOpenAiRequest({
+    model: "tabbit/priority",
+    input: `CURRENT_USER_START_${"x".repeat(21_000)}_CURRENT_USER_END`,
+  });
+  let sendCalls = 0;
+
+  const result = await runGatewaySession(normalized, {
+    sendPromptToTabbit: async () => {
+      sendCalls += 1;
+      throw new Error("should not send an oversized prompt to Tabbit");
+    },
+    executeServerToolUse: async () => {
+      throw new Error("should not execute server tools");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "invalid_request");
+  assert.match(result.detail, /exceeding Tabbit's observed 20500-character limit/);
+  assert.equal(result.attemptedModels.length, 0);
+  assert.equal(sendCalls, 0);
 });
 
 test("parseStructuredEnvelope accepts fenced JSON", () => {

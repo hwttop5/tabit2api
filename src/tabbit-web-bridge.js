@@ -21,7 +21,7 @@ export { classifyAttemptFailure, toGatewayModelId } from "./tabbit-bridge-core.j
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.TABBIT_SEND_TIMEOUT_MS || 180_000);
 const MODEL_CACHE_MS = Number(process.env.TABBIT_MODEL_CACHE_MS || 300_000);
-const LARGE_AGENT_PROMPT_CHARS = 32_000;
+const LARGE_AGENT_PROMPT_CHARS = 20_500;
 
 let bridgePromise = null;
 let chatPagePromise = null;
@@ -315,7 +315,7 @@ function promptDiagnostics(prompt) {
 
   if (text.length > LARGE_AGENT_PROMPT_CHARS) {
     diagnostics.push(
-      "This is a large agent prompt. If `tabbit2api login --refresh` already succeeded and a minimal `/v1/responses` request works, start a new Codex session or reduce conversation/context before retrying.",
+      "This exceeds Tabbit's observed 20500-character prompt limit. Tabbit2API normally compacts agent context before sending; if this still appears after a minimal `/v1/responses` request succeeds, reduce the current user input, attachment metadata, tool schemas, or recent conversation context.",
     );
   }
 

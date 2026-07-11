@@ -63,6 +63,171 @@ function promptJson(value) {
   return JSON.stringify(value);
 }
 
+export const TABBIT_PROMPT_TARGET_CHARS = 19_000;
+export const TABBIT_PROMPT_MAX_CHARS = 20_500;
+
+const PROMPT_CONTEXT_SECTION_CHARS = 8_000;
+const PROMPT_RECENT_MESSAGE_COUNT = 6;
+
+function compactPromptText(value, maxChars, label) {
+  const text = typeof value === "string" ? value : "";
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const marker = `\n[... ${label} omitted by Tabbit2API prompt compaction ...]\n`;
+  if (maxChars <= marker.length) {
+    return text.slice(0, maxChars);
+  }
+
+  const available = maxChars - marker.length;
+  const headChars = Math.ceil(available / 2);
+  const tailChars = Math.floor(available / 2);
+  return `${text.slice(0, headChars)}${marker}${text.slice(-tailChars)}`;
+}
+
+function allocateTextBudgets(lengths, totalBudget) {
+  if (!lengths.length) {
+    return [];
+  }
+
+  const totalLength = lengths.reduce((total, length) => total + length, 0);
+  if (totalLength <= totalBudget) {
+    return [...lengths];
+  }
+
+  const minimums = lengths.map((length) => Math.min(length, 512));
+  const minimumTotal = minimums.reduce((total, length) => total + length, 0);
+  if (minimumTotal >= totalBudget) {
+    let remainingBudget = totalBudget;
+    let remainingLength = totalLength;
+    return lengths.map((length, index) => {
+      const allocation =
+        index === lengths.length - 1
+          ? remainingBudget
+          : Math.floor((remainingBudget * length) / remainingLength);
+      remainingBudget -= allocation;
+      remainingLength -= length;
+      return allocation;
+    });
+  }
+
+  const extraLengths = lengths.map((length, index) => length - minimums[index]);
+  let remainingBudget = totalBudget - minimumTotal;
+  let remainingExtra = extraLengths.reduce((total, length) => total + length, 0);
+  return lengths.map((length, index) => {
+    if (index === lengths.length - 1) {
+      return Math.min(length, minimums[index] + remainingBudget);
+    }
+
+    const extraAllocation = remainingExtra
+      ? Math.floor((remainingBudget * extraLengths[index]) / remainingExtra)
+      : 0;
+    remainingBudget -= extraAllocation;
+    remainingExtra -= extraLengths[index];
+    return Math.min(length, minimums[index] + extraAllocation);
+  });
+}
+
+function compactSystemInstructions(system) {
+  const entries = Array.isArray(system) ? system : [];
+  const budgets = allocateTextBudgets(
+    entries.map((entry) => entry.length),
+    PROMPT_CONTEXT_SECTION_CHARS,
+  );
+  return entries.map((entry, index) =>
+    compactPromptText(entry, budgets[index], "system instructions"),
+  );
+}
+
+function compactDeveloperMessages(messages) {
+  const nextMessages = clone(messages);
+  const developerTextBlocks = [];
+
+  for (const message of nextMessages) {
+    if (message?.role !== "developer" || !Array.isArray(message.content)) {
+      continue;
+    }
+
+    for (const block of message.content) {
+      if (block?.type === "text" && typeof block.text === "string") {
+        developerTextBlocks.push(block);
+      }
+    }
+  }
+
+  const budgets = allocateTextBudgets(
+    developerTextBlocks.map((block) => block.text.length),
+    PROMPT_CONTEXT_SECTION_CHARS,
+  );
+  developerTextBlocks.forEach((block, index) => {
+    block.text = compactPromptText(
+      block.text,
+      budgets[index],
+      "developer context",
+    );
+  });
+
+  return nextMessages;
+}
+
+function compactConversationHistory(messages) {
+  if (messages.length <= PROMPT_RECENT_MESSAGE_COUNT) {
+    return { messages, omittedMessageCount: 0 };
+  }
+
+  const keepIndexes = new Set();
+  for (
+    let index = Math.max(0, messages.length - PROMPT_RECENT_MESSAGE_COUNT);
+    index < messages.length;
+    index += 1
+  ) {
+    keepIndexes.add(index);
+  }
+
+  const latestUserIndex = messages.findLastIndex(
+    (message) => message?.role === "user",
+  );
+  if (latestUserIndex >= 0) {
+    keepIndexes.add(latestUserIndex);
+  }
+
+  const firstDeveloperIndex = messages.findIndex(
+    (message) => message?.role === "developer",
+  );
+  if (firstDeveloperIndex >= 0) {
+    keepIndexes.add(firstDeveloperIndex);
+  }
+
+  const keptMessages = messages.filter((_message, index) =>
+    keepIndexes.has(index),
+  );
+  const omittedMessageCount = messages.length - keptMessages.length;
+  if (!omittedMessageCount) {
+    return { messages, omittedMessageCount: 0 };
+  }
+
+  const markerMessage = {
+    role: "developer",
+    content: [
+      {
+        type: "text",
+        text: `[${omittedMessageCount} older conversation messages omitted by Tabbit2API prompt compaction.]`,
+      },
+    ],
+  };
+  const insertAt = keptMessages.findIndex(
+    (message) => message?.role !== "developer",
+  );
+  if (insertAt < 0) {
+    keptMessages.push(markerMessage);
+  } else {
+    keptMessages.splice(insertAt, 0, markerMessage);
+  }
+
+  return { messages: keptMessages, omittedMessageCount };
+}
+
 export function contentBlocksToText(blocks) {
   return blocks
     .filter((block) => block.type === "text" && typeof block.text === "string")
@@ -550,7 +715,7 @@ function unavailableClientToolUses(parsedBlocks, normalizedRequest) {
   );
 }
 
-export function buildStructuredPrompt(normalizedRequest) {
+function renderStructuredPrompt(normalizedRequest) {
   const blockedTools = [...blockedClientToolNames(normalizedRequest)];
   const hasAttachments = Boolean(normalizedRequest.attachments?.length);
   const clientTools = activeClientTools(normalizedRequest).map((tool) => ({
@@ -645,6 +810,48 @@ export function buildStructuredPrompt(normalizedRequest) {
   }
 
   return sections.join("\n");
+}
+
+export function prepareStructuredPrompt(normalizedRequest) {
+  const originalPrompt = renderStructuredPrompt(normalizedRequest);
+  if (originalPrompt.length <= TABBIT_PROMPT_TARGET_CHARS) {
+    return {
+      ok: true,
+      prompt: originalPrompt,
+      originalChars: originalPrompt.length,
+      sentChars: originalPrompt.length,
+      compacted: false,
+      omittedMessageCount: 0,
+    };
+  }
+
+  const compactedRequest = {
+    ...normalizedRequest,
+    system: compactSystemInstructions(normalizedRequest.system),
+    messages: compactDeveloperMessages(normalizedRequest.messages),
+  };
+  let prompt = renderStructuredPrompt(compactedRequest);
+  let omittedMessageCount = 0;
+
+  if (prompt.length > TABBIT_PROMPT_TARGET_CHARS) {
+    const compactedHistory = compactConversationHistory(compactedRequest.messages);
+    compactedRequest.messages = compactedHistory.messages;
+    omittedMessageCount = compactedHistory.omittedMessageCount;
+    prompt = renderStructuredPrompt(compactedRequest);
+  }
+
+  return {
+    ok: prompt.length <= TABBIT_PROMPT_MAX_CHARS,
+    prompt,
+    originalChars: originalPrompt.length,
+    sentChars: prompt.length,
+    compacted: prompt !== originalPrompt,
+    omittedMessageCount,
+  };
+}
+
+export function buildStructuredPrompt(normalizedRequest) {
+  return prepareStructuredPrompt(normalizedRequest).prompt;
 }
 
 function stripJsonFences(text) {
@@ -945,10 +1152,34 @@ export async function runGatewaySession(normalizedRequest, deps) {
   };
 
   for (let iteration = 0; iteration < 8; iteration += 1) {
-    const prompt = buildStructuredPrompt({
+    const preparedPrompt = prepareStructuredPrompt({
       ...workingRequest,
       messages: workingMessages,
     });
+    if (preparedPrompt.compacted) {
+      console.log(
+        `[tabbit-prompt] original=${preparedPrompt.originalChars} sent=${preparedPrompt.sentChars} compacted=true omitted_messages=${preparedPrompt.omittedMessageCount}`,
+      );
+    }
+
+    if (!preparedPrompt.ok) {
+      return {
+        ok: false,
+        error: "invalid_request",
+        detail: `Structured prompt is ${preparedPrompt.sentChars} characters after safe compaction, exceeding Tabbit's observed ${TABBIT_PROMPT_MAX_CHARS}-character limit. Reduce the current user input, attachment metadata, tool schemas, or recent conversation context.`,
+        requestedModelAlias: workingRequest.requestedModel,
+        attemptedModels: [],
+        fallbackHappened: false,
+        promptCompaction: {
+          originalChars: preparedPrompt.originalChars,
+          sentChars: preparedPrompt.sentChars,
+          compacted: preparedPrompt.compacted,
+          omittedMessageCount: preparedPrompt.omittedMessageCount,
+        },
+      };
+    }
+
+    const prompt = preparedPrompt.prompt;
     addTokenEstimate(usageEstimate, prompt);
 
     const tabbitResult = await deps.sendPromptToTabbit({
