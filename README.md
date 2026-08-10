@@ -74,6 +74,14 @@ macOS 可执行文件: /Applications/Tabbit.app/Contents/MacOS/Tabbit
 macOS 用户数据目录: ~/Library/Application Support/Tabbit/User Data
 ```
 
+Windows 会优先使用 `TABBIT_EXECUTABLE`；如果该变量指向已改名的 `Tabbit.exe` 或 `Tabbit Browser.exe`，会自动尝试同目录的另一个名称。未设置变量时还会读取 Windows `App Paths` 注册信息，因此 D 盘等自定义安装通常无需手动配置。仍无法识别时，可显式设置：
+
+```powershell
+$env:TABBIT_EXECUTABLE = "D:\Program Files\Tabbit\Application\Tabbit Browser.exe"
+$env:TABBIT_USER_DATA_DIR = "$env:LOCALAPPDATA\Tabbit\User Data"
+tabbit2api doctor
+```
+
 运行时状态目录默认值：
 
 ```text

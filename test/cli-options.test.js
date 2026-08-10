@@ -14,8 +14,11 @@ import {
   defaultAppDataRoot,
   defaultTabbitExecutable,
   defaultTabbitUserDataDir,
+  readWindowsTabbitAppPath,
+  resolveTabbitExecutable,
 } from "../src/config.js";
 import { runStart } from "../src/cli.js";
+import { isLoggedIn } from "../src/login.js";
 
 test("CLI defaults to start command and documented gateway options", () => {
   assert.deepEqual(parseCliArgs([], {}), {
@@ -103,18 +106,19 @@ test("platform defaults resolve Windows Tabbit and runtime paths", () => {
   const homeDir = "C:\\Users\\tester";
   const env = { LOCALAPPDATA: "D:\\LocalAppData" };
   const legacyExecutable =
-    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit.exe";
+    "D:\\LocalAppData\\Tabbit\\Application\\Tabbit.exe";
   const browserExecutable =
-    "C:\\Users\\tester\\AppData\\Local\\Tabbit\\Application\\Tabbit Browser.exe";
+    "D:\\LocalAppData\\Tabbit\\Application\\Tabbit Browser.exe";
 
   assert.equal(
-    defaultTabbitExecutable({ platform: "win32", homeDir }),
+    defaultTabbitExecutable({ platform: "win32", homeDir, env }),
     legacyExecutable,
   );
   assert.equal(
     defaultTabbitExecutable({
       platform: "win32",
       homeDir,
+      env,
       existsSync: (candidate) => candidate === legacyExecutable,
     }),
     legacyExecutable,
@@ -123,6 +127,7 @@ test("platform defaults resolve Windows Tabbit and runtime paths", () => {
     defaultTabbitExecutable({
       platform: "win32",
       homeDir,
+      env,
       existsSync: (candidate) => candidate === browserExecutable,
     }),
     browserExecutable,
@@ -131,6 +136,7 @@ test("platform defaults resolve Windows Tabbit and runtime paths", () => {
     defaultTabbitExecutable({
       platform: "win32",
       homeDir,
+      env,
       existsSync: () => false,
     }),
     legacyExecutable,
@@ -143,6 +149,74 @@ test("platform defaults resolve Windows Tabbit and runtime paths", () => {
     defaultAppDataRoot({ platform: "win32", homeDir, env }),
     "D:\\LocalAppData\\tabbit2api",
   );
+});
+
+test("Windows executable resolution switches known names inside an explicit custom directory", () => {
+  const configured = "D:\\Program Files\\Tabbit\\Application\\Tabbit.exe";
+  const browserExecutable =
+    "D:\\Program Files\\Tabbit\\Application\\Tabbit Browser.exe";
+
+  const resolution = resolveTabbitExecutable({
+    env: {
+      LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+      TABBIT_EXECUTABLE: configured,
+    },
+    existsSync: (candidate) => candidate === browserExecutable,
+    homeDir: "C:\\Users\\tester",
+    platform: "win32",
+    readRegistryAppPath: () => null,
+  });
+
+  assert.equal(resolution.path, browserExecutable);
+  assert.equal(resolution.source, "env-sibling");
+  assert.deepEqual(resolution.candidates, [configured, browserExecutable]);
+});
+
+test("Windows executable resolution uses the registered App Paths target", () => {
+  const registered = "D:\\Apps\\Tabbit\\Application\\Tabbit Browser.exe";
+  const resolution = resolveTabbitExecutable({
+    env: { LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local" },
+    existsSync: (candidate) => candidate === registered,
+    homeDir: "C:\\Users\\tester",
+    platform: "win32",
+    readRegistryAppPath: () => registered,
+  });
+
+  assert.equal(resolution.path, registered);
+  assert.equal(resolution.source, "registry");
+});
+
+test("Windows App Paths parsing accepts localized value labels and expandable paths", () => {
+  const result = readWindowsTabbitAppPath({
+    env: { LOCALAPPDATA: "D:\\Local" },
+    execFileSyncImpl: () => `
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Tabbit.exe
+    （默认）    REG_EXPAND_SZ    %LOCALAPPDATA%\\Tabbit\\Application\\Tabbit Browser.exe
+`,
+  });
+
+  assert.equal(
+    result,
+    "D:\\Local\\Tabbit\\Application\\Tabbit Browser.exe",
+  );
+});
+
+test("Windows executable resolution preserves an invalid arbitrary explicit path", () => {
+  const configured = "D:\\Portable\\custom-tabbit-build.exe";
+  const resolution = resolveTabbitExecutable({
+    env: {
+      LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+      TABBIT_EXECUTABLE: configured,
+    },
+    existsSync: () => false,
+    homeDir: "C:\\Users\\tester",
+    platform: "win32",
+    readRegistryAppPath: () => "D:\\Apps\\Tabbit\\Tabbit Browser.exe",
+  });
+
+  assert.equal(resolution.path, configured);
+  assert.equal(resolution.source, "env-missing");
+  assert.deepEqual(resolution.candidates, [configured]);
 });
 
 test("platform defaults resolve macOS Tabbit and runtime paths", () => {
@@ -305,6 +379,44 @@ test("doctor prints a readable report", async () => {
   assert.match(output, /Runtime/);
   assert.match(output, /Gateway/);
   assert.match(output, /\/health/);
+});
+
+test("doctor explains executable and user-data overrides when Tabbit paths are missing", async () => {
+  const originalLog = console.log;
+  let output = "";
+  console.log = (message) => {
+    output += `${message}\n`;
+  };
+
+  try {
+    await runDoctor(
+      {
+        host: "127.0.0.1",
+        port: 50124,
+        apiKey: "doctor-key",
+      },
+      {},
+      {
+        checkHealth: async () => ({
+          reachable: false,
+          statusCode: null,
+          runtimeInitialized: null,
+          error: "connect ECONNREFUSED",
+        }),
+        hasLabProfile: async () => true,
+        pathExists: async () => false,
+        tabbitExecutable: "D:\\Apps\\Tabbit\\Application\\Tabbit.exe",
+        tabbitExecutableSource: "env-missing",
+        tabbitUserDataDir: "D:\\Profiles\\Tabbit\\User Data",
+      },
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.match(output, /exe source: TABBIT_EXECUTABLE \(missing\)/);
+  assert.match(output, /Set `TABBIT_EXECUTABLE`/);
+  assert.match(output, /set `TABBIT_USER_DATA_DIR`/i);
 });
 
 test("doctor reports reachable health when gateway is already running", async () => {

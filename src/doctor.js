@@ -6,6 +6,7 @@ import {
   LAB_PROFILE_DIR,
   LAB_ROOT,
   TABBIT_EXECUTABLE,
+  TABBIT_EXECUTABLE_SOURCE,
   TABBIT_USER_DATA_DIR,
   summarizeEnvSource,
 } from "./config.js";
@@ -22,6 +23,19 @@ async function pathExists(targetPath) {
 
 function formatStatus(ok) {
   return ok ? "ok" : "missing";
+}
+
+function formatExecutableSource(source) {
+  const labels = {
+    default: "default path",
+    "default-missing": "default path (missing)",
+    env: "TABBIT_EXECUTABLE",
+    "env-missing": "TABBIT_EXECUTABLE (missing)",
+    "env-sibling": "TABBIT_EXECUTABLE sibling",
+    registry: "Windows App Paths",
+    "registry-sibling": "Windows App Paths sibling",
+  };
+  return labels[source] || source || "unknown";
 }
 
 async function checkHealth(baseUrl, apiKey) {
@@ -58,6 +72,11 @@ export async function collectDoctorReport(
   const apiKey = options.apiKey || env.TABBIT_API_KEY || DEFAULT_API_KEY;
   const optionSources = options.optionSources || {};
   const baseUrl = `http://${host}:${port}`;
+  const pathExistsFn = deps.pathExists || pathExists;
+  const tabbitExecutable = deps.tabbitExecutable || TABBIT_EXECUTABLE;
+  const tabbitExecutableSource =
+    deps.tabbitExecutableSource || TABBIT_EXECUTABLE_SOURCE;
+  const tabbitUserDataDir = deps.tabbitUserDataDir || TABBIT_USER_DATA_DIR;
   const runtimeProfileExists = await (deps.hasLabProfile || hasLabProfile)(
     LAB_PROFILE_DIR,
   );
@@ -65,12 +84,13 @@ export async function collectDoctorReport(
 
   return {
     tabbitExecutable: {
-      path: TABBIT_EXECUTABLE,
-      exists: await pathExists(TABBIT_EXECUTABLE),
+      path: tabbitExecutable,
+      source: tabbitExecutableSource,
+      exists: await pathExistsFn(tabbitExecutable),
     },
     tabbitUserData: {
-      path: TABBIT_USER_DATA_DIR,
-      exists: await pathExists(TABBIT_USER_DATA_DIR),
+      path: tabbitUserDataDir,
+      exists: await pathExistsFn(tabbitUserDataDir),
     },
     runtime: {
       root: LAB_ROOT,
@@ -91,14 +111,15 @@ export async function collectDoctorReport(
   };
 }
 
-export async function runDoctor(options = {}, env = process.env) {
-  const report = await collectDoctorReport(options, env);
+export async function runDoctor(options = {}, env = process.env, deps = {}) {
+  const report = await collectDoctorReport(options, env, deps);
 
   const lines = [
     "Tabbit2API doctor",
     "",
     "Tabbit",
     `- executable: ${formatStatus(report.tabbitExecutable.exists)} (${report.tabbitExecutable.path})`,
+    `- exe source: ${formatExecutableSource(report.tabbitExecutable.source)}`,
     `- user data : ${formatStatus(report.tabbitUserData.exists)} (${report.tabbitUserData.path})`,
     "",
     "Runtime",
@@ -126,7 +147,20 @@ export async function runDoctor(options = {}, env = process.env) {
     );
   }
 
-  if (!report.runtime.profileExists) {
+  if (!report.tabbitExecutable.exists || !report.tabbitUserData.exists) {
+    lines.push("");
+    lines.push("Next step");
+    if (!report.tabbitExecutable.exists) {
+      lines.push(
+        "- Set `TABBIT_EXECUTABLE` to the installed `Tabbit Browser.exe` or `Tabbit.exe` path.",
+      );
+    }
+    if (!report.tabbitUserData.exists) {
+      lines.push(
+        "- Run Tabbit under this Windows account, or set `TABBIT_USER_DATA_DIR` to its `User Data` directory.",
+      );
+    }
+  } else if (!report.runtime.profileExists) {
     lines.push("");
     lines.push("Next step");
     lines.push("- Run `tabbit2api` or `tabbit2api login --refresh` to create a runtime profile.");
