@@ -30,6 +30,7 @@ let sendQueue = Promise.resolve();
 let activeSendCount = 0;
 let lastBridgeError = null;
 let streamSequence = 0;
+let pageModuleSendUnavailable = false;
 
 function serializeError(error) {
   return error instanceof Error ? error.message : String(error);
@@ -91,6 +92,270 @@ function runExclusively(task) {
 
 function cleanText(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function isNavigationContextError(error) {
+  return /execution context was destroyed|cannot find context with specified id/i.test(
+    serializeError(error),
+  );
+}
+
+async function waitForTabbitPageReady(page) {
+  try {
+    await page.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+  } catch {
+    // A client-side route may already be transitioning to the session page.
+  }
+  await page.waitForFunction(
+    () => Array.isArray(globalThis.webpackChunk_N_E),
+    null,
+    { timeout: 30_000 },
+  );
+  await page.waitForTimeout(300);
+}
+
+export async function evaluateTabbitPageWithNavigationRetry(
+  page,
+  evaluator,
+  argument,
+  { preparePage = waitForTabbitPageReady } = {},
+) {
+  try {
+    return await page.evaluate(evaluator, argument);
+  } catch (error) {
+    if (!isNavigationContextError(error)) {
+      throw error;
+    }
+    await preparePage(page);
+    return page.evaluate(evaluator, argument);
+  }
+}
+
+export function shouldFallbackToTabbitUi(result) {
+  return Boolean(
+    result &&
+      !result.ok &&
+      result.error === "send_threw" &&
+      /Unable to find Tabbit sendMessage function/i.test(
+        cleanText(result.detail),
+      ),
+  );
+}
+
+export function isTabbitModelUnavailableText(value) {
+  const text = cleanText(value);
+  return Boolean(
+    /\[492\]/i.test(text) ||
+      /欢迎使用\s*Tabbit\s*浏览器/i.test(text) ||
+      /免费使用最全最先进的模型/i.test(text) ||
+      /AI\s*服务.*不可用/i.test(text) ||
+      /暂时不可用/i.test(text) ||
+      /稍后重试/i.test(text) ||
+      /Unable to process this request at the moment\.?/i.test(text),
+  );
+}
+
+async function prepareUiChatPage(page) {
+  await page.goto(TABBIT_CHAT_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: 60_000,
+  });
+  await waitForTabbitPageReady(page);
+  await page.waitForSelector('[data-chip-editor="true"]', {
+    state: "visible",
+    timeout: 30_000,
+  });
+}
+
+async function selectUiModel(page, selectedModel) {
+  const modelButton = page
+    .locator('button[aria-haspopup="dialog"]')
+    .filter({ hasText: /\S/ })
+    .last();
+  await modelButton.waitFor({ state: "visible", timeout: 30_000 });
+  const currentModel = cleanText(await modelButton.innerText()).split("\n")[0];
+  if (currentModel === selectedModel) {
+    return;
+  }
+
+  await modelButton.click();
+  await page.waitForSelector('[role="option"] [data-model-selector-model-name]', {
+    state: "visible",
+    timeout: 15_000,
+  });
+  const selected = await page.evaluate((modelName) => {
+    const options = Array.from(document.querySelectorAll('[role="option"]'));
+    const option = options.find(
+      (candidate) =>
+        candidate
+          .querySelector("[data-model-selector-model-name]")
+          ?.textContent?.trim() === modelName,
+    );
+    if (!option) {
+      return false;
+    }
+    option.click();
+    return true;
+  }, selectedModel);
+  if (!selected) {
+    throw new Error(`Unable to select Tabbit model '${selectedModel}' in the UI.`);
+  }
+
+  await page.waitForFunction(
+    (modelName) =>
+      Array.from(
+        document.querySelectorAll('button[aria-haspopup="dialog"]'),
+      ).some(
+        (element) =>
+          element.innerText?.trim().split("\n")[0] === modelName,
+      ),
+    selectedModel,
+    { timeout: 15_000 },
+  );
+}
+
+async function readUiAssistantSnapshot(page) {
+  return page.evaluate(() => {
+    const assistants = Array.from(
+      document.querySelectorAll('[data-message-type="assistant"]'),
+    );
+    const assistant = assistants[assistants.length - 1];
+    if (!assistant) {
+      return null;
+    }
+    const renderer = assistant.querySelector(".markdown-renderer");
+    const actionBar = assistant.querySelector(
+      '[data-message-action-bar="true"]',
+    );
+    return {
+      complete: Boolean(
+        actionBar && !actionBar.classList.contains("pointer-events-none"),
+      ),
+      id: assistant.getAttribute("data-message-id") || null,
+      idle: Boolean(document.querySelector("#ChatSendButton")),
+      rawText: (assistant.innerText || "").trim(),
+      text: (renderer?.innerText || "").trim(),
+    };
+  });
+}
+
+async function sendUsingPageUi(
+  page,
+  { prompt, selectedModel, timeoutMs, onDelta, attachments = [] },
+) {
+  if (attachments.length > 0) {
+    return {
+      ok: false,
+      error: "invalid_request",
+      detail:
+        "The current Tabbit Web UI fallback does not expose attachment injection. Text requests remain supported; attachment requests require a compatible Tabbit page module.",
+      source: "ui_fallback",
+    };
+  }
+
+  try {
+    await prepareUiChatPage(page);
+    const loginState = await readLoginState(page);
+    const loginFailure = diagnoseLoginState(loginState, selectedModel, prompt);
+    if (loginFailure) {
+      return { ...loginFailure, source: "ui_fallback" };
+    }
+
+    await selectUiModel(page, selectedModel);
+    const editor = page.locator('[data-chip-editor="true"]');
+    await editor.fill(prompt);
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector("#ChatSendButton")
+          ?.getAttribute("data-send-blocked") !== "true",
+      null,
+      { timeout: 15_000 },
+    );
+    await page.locator("#ChatSendButton").click();
+
+    const deadline = Date.now() + timeoutMs;
+    let emittedText = "";
+    let latestSnapshot = null;
+    while (Date.now() < deadline) {
+      const snapshot = await readUiAssistantSnapshot(page);
+      if (snapshot) {
+        latestSnapshot = snapshot;
+        if (snapshot.text && snapshot.text !== emittedText) {
+          const delta = snapshot.text.startsWith(emittedText)
+            ? snapshot.text.slice(emittedText.length)
+            : snapshot.text;
+          emittedText = snapshot.text;
+          if (delta && typeof onDelta === "function") {
+            onDelta(delta);
+          }
+        }
+
+        if (snapshot.complete) {
+          const detail = snapshot.text || snapshot.rawText;
+          if (isTabbitModelUnavailableText(detail)) {
+            return {
+              ok: false,
+              error: "model_unavailable",
+              detail,
+              errorCodes: [492],
+              partialText: snapshot.text,
+              source: "ui_fallback",
+            };
+          }
+          if (snapshot.text) {
+            return {
+              ok: true,
+              text: snapshot.text,
+              source: "ui_fallback",
+            };
+          }
+          if (
+            snapshot.rawText &&
+            !/^(思考中|Thinking|Generating)[.….]*$/i.test(snapshot.rawText)
+          ) {
+            return {
+              ok: false,
+              error: "chatFinished_without_text",
+              detail: snapshot.rawText,
+              source: "ui_fallback",
+            };
+          }
+        }
+
+        if (
+          snapshot.idle &&
+          !snapshot.text &&
+          snapshot.rawText &&
+          !/^(思考中|Thinking|Generating)[.….]*$/i.test(snapshot.rawText)
+        ) {
+          return {
+            ok: false,
+            error: "model_unavailable",
+            detail: snapshot.rawText,
+            partialText: "",
+            source: "ui_fallback",
+          };
+        }
+      }
+      await page.waitForTimeout(100);
+    }
+
+    return {
+      ok: false,
+      error: "timeout",
+      detail: `Timed out after ${timeoutMs}ms waiting for the Tabbit UI response.`,
+      partialText: latestSnapshot?.text || "",
+      source: "ui_fallback",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: /timeout/i.test(serializeError(error)) ? "timeout" : "send_threw",
+      detail: serializeError(error),
+      source: "ui_fallback",
+    };
+  }
 }
 
 function randomReferenceId() {
@@ -235,12 +500,7 @@ async function ensureChatPage(bridge) {
     if (!chatPagePromise) {
       chatPagePromise = (async () => {
         const nextPage = await openPage(bridge.context, TABBIT_CHAT_URL);
-        await nextPage.waitForFunction(
-          () => Array.isArray(globalThis.webpackChunk_N_E),
-          null,
-          { timeout: 30_000 },
-        );
-        await nextPage.waitForTimeout(500);
+        await waitForTabbitPageReady(nextPage);
         bridge.page = nextPage;
         return nextPage;
       })().finally(() => {
@@ -251,11 +511,7 @@ async function ensureChatPage(bridge) {
     return chatPagePromise;
   }
 
-  await page.waitForFunction(
-    () => Array.isArray(globalThis.webpackChunk_N_E),
-    null,
-    { timeout: 30_000 },
-  );
+  await waitForTabbitPageReady(page);
   return page;
 }
 
@@ -279,9 +535,10 @@ async function readLoginState(page) {
         /免费使用最全最先进的模型/i.test(bodyText),
       hasComposer: Boolean(
         document.querySelector(
-          "textarea, [contenteditable='true'], input[type='text']",
+          "textarea, [contenteditable='true'], [data-chip-editor='true'], input[type='text']",
         ),
       ),
+      isLoginPage: /\/login(?:\/|$)/i.test(location.pathname),
       url: location.href,
       title: document.title,
     };
@@ -333,6 +590,20 @@ function appendPromptDiagnostics(detail, prompt) {
 }
 
 export function diagnoseLoginState(loginState, requestedModelAlias, prompt) {
+  if (loginState?.isLoginPage) {
+    return {
+      ok: false,
+      error: "login_required",
+      detail: appendPromptDiagnostics(
+        "The local Tabbit runtime page is on the login page even though cached browser state may still contain a token. Close all Tabbit windows, then run `tabbit2api login --refresh` and complete sign-in in the login window.",
+        prompt,
+      ),
+      requestedModelAlias,
+      attemptedModels: [],
+      fallbackHappened: false,
+    };
+  }
+
   if (!loginState?.hasTabSignin) {
     return {
       ok: false,
@@ -932,6 +1203,7 @@ async function sendUsingPageModule(
 
       function isBrowserGateDetail(detail) {
         return (
+          /\[492\]/i.test(detail || "") ||
           /欢迎使用\s*Tabbit\s*浏览器/i.test(detail || "") ||
           /免费使用最全最先进的模型/i.test(detail || "")
         );
@@ -1023,9 +1295,8 @@ async function sendUsingPageModule(
           if (isBrowserGateDetail(detail)) {
             settle({
               ok: false,
-              error: "login_required",
-              detail:
-                "Tabbit returned the browser sign-in gate while sending the request. Close all Tabbit windows, then run `tabbit2api login --refresh` so Tabbit2API can refresh its local runtime profile.",
+              error: "model_unavailable",
+              detail,
               errorCodes: errors
                 .map((entry) => entry.code)
                 .filter(Boolean),
@@ -1225,7 +1496,7 @@ export async function getTabbitModels() {
   const page = await ensureChatPage(bridge);
   let payload;
   try {
-    payload = await page.evaluate(async (url) => {
+    payload = await evaluateTabbitPageWithNavigationRetry(page, async (url) => {
     const response = await fetch(url, {
       credentials: "include",
       headers: {
@@ -1382,14 +1653,23 @@ export async function sendPromptToTabbit({
           detail: `${attempt.gatewayModelId} is not present in the current Tabbit model catalog.`,
         };
       } else {
-        result = await sendUsingPageModule(page, {
+        const sendOptions = {
           prompt,
           selectedModel: attempt.selectedModel,
           timeoutMs,
           models: rawModels,
           onDelta,
           attachments: materializedAttachments,
-        });
+        };
+        if (pageModuleSendUnavailable) {
+          result = await sendUsingPageUi(page, sendOptions);
+        } else {
+          result = await sendUsingPageModule(page, sendOptions);
+          if (shouldFallbackToTabbitUi(result)) {
+            pageModuleSendUnavailable = true;
+            result = await sendUsingPageUi(page, sendOptions);
+          }
+        }
       }
 
       const decoratedResult = {

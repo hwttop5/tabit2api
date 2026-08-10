@@ -31,7 +31,7 @@ Tabbit2API 使用独立的本地运行时 profile，不会直接接管正在运�
 4. 在弹出的 Tabbit2API 登录窗口中完成登录
 5. 再运行 `tabbit2api start`
 
-如果客户端请求返回类似 `[492] 欢迎使用 Tabbit 浏览器...` 或提示登录态不可用，通常是运行时 profile 没同步到有效登录态。请关闭 Tabbit 后重新执行 `tabbit2api login --refresh`。
+如果运行态已经跳到 Tabbit 登录页，或接口明确提示登录态不可用，请关闭 Tabbit 后重新执行 `tabbit2api login --refresh`。已登录状态下某个模型返回 `[492]` 时，`tabbit/priority` 会继续尝试当前目录中的其他可用模型，并最终使用 `tabbit/Default` 兜底。
 
 ## 验证环境
 

@@ -27,7 +27,10 @@ import {
   attachmentUploadResultToReference,
   classifyAttemptFailure,
   diagnoseLoginState,
+  evaluateTabbitPageWithNavigationRetry,
+  isTabbitModelUnavailableText,
   putPresignedUpload,
+  shouldFallbackToTabbitUi,
 } from "../src/tabbit-web-bridge.js";
 import {
   buildGatewayCatalogBundle,
@@ -902,7 +905,7 @@ test("OpenAI routes surface Tabbit upstream availability failures as 503", async
   }
 });
 
-test("Tabbit browser gate messages are classified as login failures", () => {
+test("Tabbit browser gate messages distinguish preflight login failures from retryable model failures", () => {
   assert.deepEqual(
     classifyAttemptFailure({
       ok: false,
@@ -915,8 +918,27 @@ test("Tabbit browser gate messages are classified as login failures", () => {
   assert.deepEqual(
     classifyAttemptFailure({
       ok: false,
+      error: "model_unavailable",
+      detail: "[492] 欢迎使用 Tabbit 浏览器（https://www.tabbitbrowser.com/），可免费使用最全最先进的模型。",
+      errorCodes: [492],
+    }),
+    { retryable: true, reason: "upstream_unavailable" },
+  );
+
+  assert.deepEqual(
+    classifyAttemptFailure({
+      ok: false,
       error: "tabbit_error",
       detail: "Service is busy. Please try again tomorrow.",
+    }),
+    { retryable: true, reason: "upstream_unavailable" },
+  );
+
+  assert.deepEqual(
+    classifyAttemptFailure({
+      ok: false,
+      error: "tabbit_error",
+      detail: "AI服务暂时不可用，请稍后重试",
     }),
     { retryable: true, reason: "upstream_unavailable" },
   );
@@ -985,6 +1007,88 @@ test("Tabbit login diagnostics accept flat signed-out state", () => {
   );
 
   assert.equal(result.error, "login_required");
+});
+
+test("Tabbit login diagnostics reject a login page even when the browser bridge has a stale token", () => {
+  const result = diagnoseLoginState(
+    {
+      hasTabSignin: true,
+      hasBrowserGateMessage: false,
+      isLoginPage: true,
+      loginState: {
+        isLoggedIn: true,
+        hasToken: true,
+      },
+      url: "https://web.tabbit.ai/login?callback=%2Fsession%2Fnew",
+    },
+    "tabbit/priority",
+    "hello",
+  );
+
+  assert.equal(result.error, "login_required");
+  assert.match(result.detail, /login page/);
+});
+
+test("Tabbit page evaluation retries once after a navigation destroys the execution context", async () => {
+  let attempts = 0;
+  let preparations = 0;
+  const page = {
+    evaluate: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error(
+          "page.evaluate: Execution context was destroyed, most likely because of a navigation",
+        );
+      }
+      return { models: [{ display_name: "Default" }] };
+    },
+  };
+
+  const result = await evaluateTabbitPageWithNavigationRetry(
+    page,
+    () => null,
+    "unused",
+    {
+      preparePage: async () => {
+        preparations += 1;
+      },
+    },
+  );
+
+  assert.equal(attempts, 2);
+  assert.equal(preparations, 1);
+  assert.equal(result.models[0].display_name, "Default");
+});
+
+test("Tabbit UI fallback is limited to the removed legacy sendMessage module", () => {
+  assert.equal(
+    shouldFallbackToTabbitUi({
+      ok: false,
+      error: "send_threw",
+      detail: "page.evaluate: Error: Unable to find Tabbit sendMessage function.",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldFallbackToTabbitUi({
+      ok: false,
+      error: "timeout",
+      detail: "Timed out waiting for Tabbit.",
+    }),
+    false,
+  );
+});
+
+test("Tabbit UI fallback recognizes fixed model-unavailable responses", () => {
+  assert.equal(
+    isTabbitModelUnavailableText("Unable to process this request at the moment."),
+    true,
+  );
+  assert.equal(
+    isTabbitModelUnavailableText("AI服务暂时不可用，请稍后重试"),
+    true,
+  );
+  assert.equal(isTabbitModelUnavailableText("Normal assistant reply"), false);
 });
 
 test("OpenAI routes surface Tabbit browser gate failures as auth errors", async () => {
@@ -1127,7 +1231,7 @@ test("bridge core preserves priority route catalog behavior", () => {
   const priority = resolveRoutePlan("priority", bundle);
   assert.equal(priority.ok, true);
   assert.equal(priority.kind, "priority_chain");
-  assert.equal(priority.attempts[0].gatewayModelId, "tabbit/Claude-Opus-4.7");
+  assert.equal(priority.attempts[0].gatewayModelId, "tabbit/GPT-5.5");
   assert.equal(
     priority.attempts.some((attempt) => attempt.gatewayModelId === "tabbit/GPT-5.5"),
     true,
@@ -1143,6 +1247,38 @@ test("bridge core preserves priority route catalog behavior", () => {
   assert.equal(unknown.ok, false);
   assert.equal(unknown.result.error, "invalid_request");
   assert.deepEqual(unknown.result.attemptedModels, []);
+});
+
+test("priority routing appends current free models and keeps Default as the final deduplicated fallback", () => {
+  const bundle = buildGatewayCatalogBundle([
+    {
+      display_name: "GPT-5.5",
+      model_access_type: "premium_only",
+    },
+    {
+      display_name: "DeepSeek-V4-Pro",
+      model_access_type: "free_metered",
+    },
+    {
+      display_name: "Current Free Model",
+      model_access_type: "free_metered",
+    },
+    {
+      display_name: "Default",
+      model_access_type: "free_unlimited",
+    },
+  ]);
+
+  const priority = resolveRoutePlan("tabbit/priority", bundle);
+  const ids = priority.attempts.map((attempt) => attempt.gatewayModelId);
+
+  assert.deepEqual(ids, [
+    "tabbit/GPT-5.5",
+    "tabbit/DeepSeek-V4-Pro",
+    "tabbit/Current Free Model",
+    "tabbit/Default",
+  ]);
+  assert.equal(new Set(ids).size, ids.length);
 });
 
 test("POST /v1/chat/completions maps client tool calls", async () => {

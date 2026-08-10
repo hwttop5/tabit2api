@@ -17,8 +17,16 @@ async function readLoginState(page) {
   });
 }
 
-function isLoggedIn(loginState) {
-  return Boolean(loginState?.loginState?.isLoggedIn || loginState?.loginState?.hasToken);
+export function isLoggedIn(loginState) {
+  const direct = loginState?.loginState;
+  const nested = direct?.loginState;
+  const flags =
+    nested && typeof nested === "object"
+      ? nested
+      : direct && typeof direct === "object"
+        ? direct
+        : loginState;
+  return Boolean(flags?.isLoggedIn || flags?.hasToken);
 }
 
 function printProfileSyncWarnings(profile) {

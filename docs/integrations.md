@@ -89,7 +89,8 @@ API 模式: codex_responses
 
 ## 常见错误
 
-- `[492] 欢迎使用 Tabbit 浏览器...`：通常是 Tabbit2API 的运行时 profile 没有有效登录态。关闭 Tabbit 后运行 `tabbit2api login --refresh`。
+- 运行态页面跳到 `/login` 或接口返回 `login_required`：关闭所有 Tabbit 窗口后运行 `tabbit2api login --refresh`。
+- 已登录状态下某个模型返回 `[492] 欢迎使用 Tabbit 浏览器...`：这也可能是当前模型权限、额度或策略限制；`tabbit/priority` 会继续尝试目录中的免费模型，并使用 `tabbit/Default` 作为最终兜底。
 - `health ok` 但客户端调用失败：`/health` 不会发起真实 Tabbit 消息请求，需要再用 `POST /v1/responses` 或客户端实际请求验证。
 - `login --refresh` 后 Codex 仍失败：先用下面的最小请求确认登录态。最小请求正常时检查 `[tabbit-prompt]` 日志，确认自动压缩后的 `sent` 长度。
 - 可见只发了“你好”但仍失败：Codex / Claude Code 等客户端可能附带隐藏 system、developer 和历史上下文。网关会自动压缩这些内容；如果返回 `invalid_request`，需要减少最新用户输入、附件元数据、工具 schema 或最近上下文。

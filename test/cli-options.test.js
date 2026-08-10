@@ -327,6 +327,23 @@ test("start launches directly when runtime profile already exists", async () => 
   ]);
 });
 
+test("login detection accepts current flat and legacy nested Tabbit state", () => {
+  assert.equal(isLoggedIn({ isLoggedIn: true, hasToken: true }), true);
+  assert.equal(
+    isLoggedIn({ loginState: { isLoggedIn: true, hasToken: true } }),
+    true,
+  );
+  assert.equal(
+    isLoggedIn({
+      loginState: {
+        loginState: { isLoggedIn: true, hasToken: true },
+      },
+    }),
+    true,
+  );
+  assert.equal(isLoggedIn({ isLoggedIn: false, hasToken: false }), false);
+});
+
 test("doctor collects filesystem checks and marks health unreachable when gateway is down", async () => {
   const env = {
     HOST: "127.0.0.1",

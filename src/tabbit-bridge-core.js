@@ -90,6 +90,9 @@ const RETRYABLE_AVAILABILITY_PATTERNS = [
   /\bnot authorized\b/i,
   /\baccess denied\b/i,
   /Service is busy\.?\s*Please try again tomorrow\.?/i,
+  /AI\s*服务.*不可用/i,
+  /暂时不可用/i,
+  /稍后重试/i,
   /欢迎使用\s*Tabbit\s*浏览器/i,
   /免费使用最全最先进的模型/i,
 ];
@@ -272,6 +275,7 @@ export function buildGatewayCatalogBundle(rawModels) {
 
   return {
     models,
+    catalogModels,
     byId: new Map(models.map((model) => [model.id, model])),
     byDisplayName: new Map(
       models.map((model) => [model.displayName.toLowerCase(), model]),
@@ -285,6 +289,66 @@ export function buildGatewayCatalogBundle(rawModels) {
   };
 }
 
+function routeAttempt(model, priorityGroup, priorityRank) {
+  return {
+    gatewayModelId: model.id,
+    displayName: model.displayName,
+    selectedModel: model.selectedModel || model.displayName,
+    availableInTabbitCatalog: model.available_in_tabbit_catalog,
+    priorityGroup,
+    priorityRank,
+  };
+}
+
+function priorityRouteAttempts(catalogBundle) {
+  if (!catalogBundle.catalogAvailable) {
+    return PRIORITY_ROUTE.map((route) => {
+      const model =
+        catalogBundle.byId.get(route.gatewayModelId) ||
+        staticRouteDescriptor(route, null);
+      return routeAttempt(model, route.tier, route.order);
+    });
+  }
+
+  const attempts = [];
+  const seenIds = new Set();
+  const pushAttempt = (model, priorityGroup) => {
+    if (!model || seenIds.has(model.id)) {
+      return;
+    }
+    seenIds.add(model.id);
+    attempts.push(routeAttempt(model, priorityGroup, attempts.length + 1));
+  };
+
+  for (const route of PRIORITY_ROUTE) {
+    const model = catalogBundle.byId.get(route.gatewayModelId);
+    if (model?.available_in_tabbit_catalog) {
+      pushAttempt(model, route.tier);
+    }
+  }
+
+  const catalogModels = catalogBundle.catalogModels || [];
+  for (const model of catalogModels) {
+    if (
+      model.displayName.toLowerCase() !== "default" &&
+      /^free(?:_|$)/i.test(cleanText(model.model_access_type))
+    ) {
+      pushAttempt(model, "catalog_free");
+    }
+  }
+
+  const defaultModel = catalogModels.find(
+    (model) => model.displayName.toLowerCase() === "default",
+  );
+  pushAttempt(defaultModel, "catalog_default");
+
+  if (attempts.length === 0) {
+    pushAttempt(catalogModels[0], "catalog_fallback");
+  }
+
+  return attempts;
+}
+
 export function resolveRoutePlan(requestedModel, catalogBundle) {
   const requestedModelAlias = normalizeRequestedModelId(requestedModel);
 
@@ -293,20 +357,7 @@ export function resolveRoutePlan(requestedModel, catalogBundle) {
       ok: true,
       kind: "priority_chain",
       requestedModelAlias,
-      attempts: PRIORITY_ROUTE.map((route) => {
-        const model =
-          catalogBundle.byId.get(route.gatewayModelId) ||
-          staticRouteDescriptor(route, null);
-
-        return {
-          gatewayModelId: model.id,
-          displayName: model.displayName,
-          selectedModel: model.selectedModel || route.displayName,
-          availableInTabbitCatalog: model.available_in_tabbit_catalog,
-          priorityGroup: route.tier,
-          priorityRank: route.order,
-        };
-      }),
+      attempts: priorityRouteAttempts(catalogBundle),
     };
   }
 
@@ -368,6 +419,10 @@ export function classifyAttemptFailure(result) {
 
   if (error === "invalid_request") {
     return { retryable: false, reason: "invalid_request" };
+  }
+
+  if (error === "model_unavailable") {
+    return { retryable: true, reason: "upstream_unavailable" };
   }
 
   if (RETRYABLE_TRANSPORT_ERRORS.has(error)) {

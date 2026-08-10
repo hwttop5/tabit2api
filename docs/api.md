@@ -46,6 +46,8 @@ tabbit/priority
 
 `/health` 不会主动发起 Tabbit 消息请求，适合做启动后自检。
 
+运行态初始化后，响应还会包含当前页面 URL、`isLoginPage`、登录桥接状态和最近一次桥接错误等诊断字段。`isLoginPage=true` 表示运行态已经进入登录页，即使缓存状态仍显示存在 token，也需要重新执行 `tabbit2api login --refresh`。
+
 典型返回：
 
 ```json
