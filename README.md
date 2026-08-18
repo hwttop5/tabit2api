@@ -1,5 +1,7 @@
 # Tabbit2API
 
+[English](README.en.md) | 简体中文
+
 Tabbit2API 是一个本地网关，它会把你电脑上已安装的 Tabbit 客户端封装成兼容 OpenAI Responses、Chat Completions、Assistants、Realtime 文本接口，以及 Anthropic Messages 的本地端点，供 Codex、Claude Code、OpenClaw、Hermes Agent 等工具使用。
 
 它运行在你自己的机器上，依赖本机 Tabbit 的登录状态，定位是本地单用户自动化桥接，而不是公网部署服务。
@@ -107,6 +109,7 @@ tabbit2api doctor
 - [发布指南](docs/publishing.md)
 - [示例配置](examples/README.md)
 - [贡献说明](CONTRIBUTING.md)
+- [AI/维护者说明](AGENTS.md)
 
 ## 使用限制
 

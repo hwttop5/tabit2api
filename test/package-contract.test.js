@@ -15,8 +15,10 @@ test("package metadata exposes the npm CLI and publish whitelist", async () => {
     "src/",
     "docs/",
     "README.md",
+    "README.en.md",
     "LICENSE",
     "CONTRIBUTING.md",
+    "CONTRIBUTING.en.md",
     "examples/",
   ]);
   assert.equal("prepare" in pkg.scripts, false);
@@ -39,11 +41,18 @@ test("package metadata exposes the npm CLI and publish whitelist", async () => {
 
   const docFiles = [
     "docs/api.md",
+    "docs/api.en.md",
     "docs/integrations.md",
+    "docs/integrations.en.md",
     "docs/publishing.md",
+    "docs/publishing.en.md",
+    "README.en.md",
+    "CONTRIBUTING.en.md",
+    "AGENTS.en.md",
   ];
   const exampleFiles = [
     "examples/README.md",
+    "examples/README.en.md",
     "examples/codex/config.toml.example",
     "examples/claude-code/env.powershell.example",
     "examples/claude-code/env.sh.example",
